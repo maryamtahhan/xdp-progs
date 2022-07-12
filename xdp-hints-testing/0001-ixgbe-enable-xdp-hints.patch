@@ -1,0 +1,322 @@
+From 2a8847e1c0585d7a3bef8bb9fcaedcd2dbc4b564 Mon Sep 17 00:00:00 2001
+From: Maryam Tahhan <mtahhan@redhat.com>
+Date: Wed, 6 Jul 2022 06:33:27 -0400
+Subject: [PATCH 1/2] ixgbe: enable xdp-hints
+
+Similar to i40e driver, add xdp hw-hints support for ixgbe driver in
+order to report rx csum offload for xdp_redirect.
+
+Signed-off-by: Maryam Tahhan <mtahhan@redhat.com>
+---
+ drivers/net/ethernet/intel/ixgbe/ixgbe_main.c | 194 +++++++++++++++---
+ 1 file changed, 169 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
+index 5c62e9963650..1483beaf5a08 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
+@@ -25,6 +25,7 @@
+ #include <linux/if_bridge.h>
+ #include <linux/prefetch.h>
+ #include <linux/bpf.h>
++#include <linux/btf.h>
+ #include <linux/bpf_trace.h>
+ #include <linux/atomic.h>
+ #include <linux/numa.h>
+@@ -60,6 +61,15 @@ static char ixgbe_default_device_descr[] =
+ static const char ixgbe_copyright[] =
+ 				"Copyright (c) 1999-2016 Intel Corporation.";
+ 
++static struct btf *ixgbe_btf;
++
++struct xdp_hints_ixgbe {
++	u16 rss_type;
++	struct xdp_hints_common common;
++};
++
++s32 btf_id_xdp_hints_ixgbe;
++
+ static const char ixgbe_overheat_msg[] = "Network adapter has been stopped because it has over heated. Restart the computer. If the problem persists, power off the system and replace the adapter";
+ 
+ static const struct ixgbe_info *ixgbe_info_tbl[] = {
+@@ -1460,40 +1470,42 @@ static inline bool ixgbe_rx_is_fcoe(struct ixgbe_ring *ring,
+ }
+ 
+ #endif /* IXGBE_FCOE */
+-/**
+- * ixgbe_rx_checksum - indicate in skb if hw indicated a good cksum
+- * @ring: structure containing ring specific data
+- * @rx_desc: current Rx descriptor being processed
+- * @skb: skb currently being received and modified
+- **/
+-static inline void ixgbe_rx_checksum(struct ixgbe_ring *ring,
+-				     union ixgbe_adv_rx_desc *rx_desc,
+-				     struct sk_buff *skb)
++
++struct ixgbe_rx_checksum_ret {
++	u16 ip_summed;
++	u16 csum_level;
++	u8 encapsulation;
++};
++
++static inline struct ixgbe_rx_checksum_ret
++_ixgbe_rx_checksum(struct ixgbe_ring *ring,
++		   union ixgbe_adv_rx_desc *rx_desc,
++		   __le16 pkt_info)
+ {
+-	__le16 pkt_info = rx_desc->wb.lower.lo_dword.hs_rss.pkt_info;
+ 	bool encap_pkt = false;
++	struct ixgbe_rx_checksum_ret ret = {};
+ 
+-	skb_checksum_none_assert(skb);
++	ret.ip_summed = CHECKSUM_NONE;
+ 
+ 	/* Rx csum disabled */
+ 	if (!(ring->netdev->features & NETIF_F_RXCSUM))
+-		return;
++		return ret;
+ 
+ 	/* check for VXLAN and Geneve packets */
+ 	if (pkt_info & cpu_to_le16(IXGBE_RXDADV_PKTTYPE_VXLAN)) {
+ 		encap_pkt = true;
+-		skb->encapsulation = 1;
++		ret.encapsulation = 1;
+ 	}
+ 
+ 	/* if IP and error */
+ 	if (ixgbe_test_staterr(rx_desc, IXGBE_RXD_STAT_IPCS) &&
+ 	    ixgbe_test_staterr(rx_desc, IXGBE_RXDADV_ERR_IPE)) {
+ 		ring->rx_stats.csum_err++;
+-		return;
++		return ret;
+ 	}
+ 
+ 	if (!ixgbe_test_staterr(rx_desc, IXGBE_RXD_STAT_L4CS))
+-		return;
++		return ret;
+ 
+ 	if (ixgbe_test_staterr(rx_desc, IXGBE_RXDADV_ERR_TCPE)) {
+ 		/*
+@@ -1501,26 +1513,49 @@ static inline void ixgbe_rx_checksum(struct ixgbe_ring *ring,
+ 		 * checksum errors.
+ 		 */
+ 		if ((pkt_info & cpu_to_le16(IXGBE_RXDADV_PKTTYPE_UDP)) &&
+-		    test_bit(__IXGBE_RX_CSUM_UDP_ZERO_ERR, &ring->state))
+-			return;
++			test_bit(__IXGBE_RX_CSUM_UDP_ZERO_ERR, &ring->state))
++			return ret;
+ 
+ 		ring->rx_stats.csum_err++;
+-		return;
++		return ret;
+ 	}
+ 
+ 	/* It must be a TCP or UDP packet with a valid checksum */
+-	skb->ip_summed = CHECKSUM_UNNECESSARY;
++	ret.ip_summed = CHECKSUM_UNNECESSARY;
+ 	if (encap_pkt) {
+ 		if (!ixgbe_test_staterr(rx_desc, IXGBE_RXD_STAT_OUTERIPCS))
+-			return;
++			return ret;
+ 
+ 		if (ixgbe_test_staterr(rx_desc, IXGBE_RXDADV_ERR_OUTERIPER)) {
+-			skb->ip_summed = CHECKSUM_NONE;
+-			return;
++			ret.ip_summed = CHECKSUM_NONE;
++			return ret;
+ 		}
+ 		/* If we checked the outer header let the stack know */
+-		skb->csum_level = 1;
++		ret.csum_level = 1;
+ 	}
++
++	return ret;
++}
++
++/**
++ * ixgbe_rx_checksum - indicate in skb if hw indicated a good cksum
++ * @ring: structure containing ring specific data
++ * @rx_desc: current Rx descriptor being processed
++ * @skb: skb currently being received and modified
++ **/
++static inline void ixgbe_rx_checksum(struct ixgbe_ring *ring,
++					union ixgbe_adv_rx_desc *rx_desc,
++					struct sk_buff *skb)
++{
++	struct ixgbe_rx_checksum_ret ret;
++	__le16 pkt_info = rx_desc->wb.lower.lo_dword.hs_rss.pkt_info;
++
++	skb_checksum_none_assert(skb);
++
++	ret = _ixgbe_rx_checksum(ring, rx_desc, pkt_info);
++	skb->ip_summed  = ret.ip_summed;
++	skb->csum_level = ret.csum_level;
++	skb->encapsulation = ret.encapsulation;
+ }
+ 
+ static unsigned int ixgbe_rx_offset(struct ixgbe_ring *rx_ring)
+@@ -1714,6 +1749,85 @@ void ixgbe_process_skb_fields(struct ixgbe_ring *rx_ring,
+ 	skb->protocol = eth_type_trans(skb, dev);
+ }
+ 
++static inline u32
++ixgbe_rx_checksum_xdp(struct ixgbe_ring *ring,
++			union ixgbe_adv_rx_desc *rx_desc,
++			struct xdp_hints_ixgbe *xdp_hints,
++			__le16 pkt_info)
++{
++	struct ixgbe_rx_checksum_ret ret = {};
++
++	ret = _ixgbe_rx_checksum(ring, rx_desc, pkt_info);
++	return xdp_hints_set_rx_csum(&xdp_hints->common, ret.ip_summed, ret.csum_level);
++}
++
++static inline u32 ixgbe_rx_hash_xdp(struct ixgbe_ring *ring,
++						   union ixgbe_adv_rx_desc *rx_desc,
++						   struct xdp_hints_ixgbe *xdp_hints,
++						   __le16 pkt_info)
++{
++	u32 flags = 0, hash, htype = PKT_HASH_TYPE_L2;
++
++	xdp_hints->rss_type = 0;
++
++	if (unlikely(!(ring->netdev->features & NETIF_F_RXHASH)))
++		return 0;
++
++	xdp_hints->rss_type = le16_to_cpu(rx_desc->wb.lower.lo_dword.hs_rss.pkt_info) &
++		   IXGBE_RXDADV_RSSTYPE_MASK;
++
++	if (unlikely(!xdp_hints->rss_type))
++		return 0;
++
++	hash = le32_to_cpu(rx_desc->wb.lower.hi_dword.rss);
++	htype = (IXGBE_RSS_L4_TYPES_MASK & (1ul << xdp_hints->rss_type)) ?
++				PKT_HASH_TYPE_L4 : PKT_HASH_TYPE_L3;
++	flags = xdp_hints_set_rx_hash(&xdp_hints->common, hash, htype);
++
++	return flags;
++}
++
++static inline void ixgbe_process_xdp_hints(struct ixgbe_ring *ring,
++						union ixgbe_adv_rx_desc *rx_desc,
++						struct xdp_buff *xdp)
++{
++	__le16 pkt_info = rx_desc->wb.lower.lo_dword.hs_rss.pkt_info;
++	struct xdp_hints_ixgbe *xdp_hints;
++	struct xdp_hints_common *common;
++	u32 btf_id = btf_id_xdp_hints_ixgbe;
++	u32 btf_sz = sizeof(*xdp_hints);
++	u32 f1 = 0, f2, f3, f4, f5 = 0;
++
++	if (!(ring->netdev->features & NETIF_F_XDP_HINTS))
++		return;
++
++	/* Driver have xdp headroom when using build_skb */
++	if (unlikely(!ring_uses_build_skb(ring)))
++		return;
++
++	xdp_hints = xdp->data - btf_sz;
++	common = &xdp_hints->common;
++
++	// TODO f1 = HINT_FLAG_RX_TIMESTAMP;
++
++	f2 = ixgbe_rx_hash_xdp(ring, rx_desc, xdp_hints, pkt_info);
++	f3 = ixgbe_rx_checksum_xdp(ring, rx_desc, xdp_hints, pkt_info);
++	f4 = xdp_hints_set_rxq(common, ring->queue_index);
++
++	if ((ring->netdev->features & NETIF_F_HW_VLAN_CTAG_RX) &&
++	    ixgbe_test_staterr(rx_desc, IXGBE_RXD_STAT_VP)) {
++		u16 vid = le16_to_cpu(rx_desc->wb.upper.vlan);
++
++		f5 = xdp_hints_set_vlan(common, vid, htons(ETH_P_8021Q));
++	}
++
++	xdp_hints_set_flags(common, (f1 | f2 | f3 | f4 | f5));
++	common->btf_id = btf_id;
++	xdp->data_meta = xdp->data - btf_sz;
++
++	xdp_buff_set_hints(xdp, BTF_ORIGIN_MODULE, true);
++}
++
+ void ixgbe_rx_skb(struct ixgbe_q_vector *q_vector,
+ 		  struct sk_buff *skb)
+ {
+@@ -2344,6 +2458,8 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
+ 			hard_start = page_address(rx_buffer->page) +
+ 				     rx_buffer->page_offset - offset;
+ 			xdp_prepare_buff(&xdp, hard_start, offset, size, true);
++			prefetchw(xdp.data - 8); /* xdp.data_meta cacheline */
++			ixgbe_process_xdp_hints(rx_ring, rx_desc, &xdp);
+ 			xdp_buff_clear_frags_flag(&xdp);
+ #if (PAGE_SIZE > 4096)
+ 			/* At larger PAGE_SIZE, frame_sz depend on len size */
+@@ -10960,7 +11076,8 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 			   NETIF_F_TSO6 |
+ 			   NETIF_F_RXHASH |
+ 			   NETIF_F_RXCSUM |
+-			   NETIF_F_HW_CSUM;
++			   NETIF_F_HW_CSUM |
++			   NETIF_F_XDP_HINTS;
+ 
+ #define IXGBE_GSO_PARTIAL_FEATURES (NETIF_F_GSO_GRE | \
+ 				    NETIF_F_GSO_GRE_CSUM | \
+@@ -10999,7 +11116,7 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	netdev->features |= NETIF_F_HIGHDMA;
+ 
+ 	netdev->vlan_features |= netdev->features | NETIF_F_TSO_MANGLEID;
+-	netdev->hw_enc_features |= netdev->vlan_features;
++	netdev->hw_enc_features |= netdev->vlan_features | NETIF_F_XDP_HINTS;
+ 	netdev->mpls_features |= NETIF_F_SG |
+ 				 NETIF_F_TSO |
+ 				 NETIF_F_TSO6 |
+@@ -11543,6 +11660,27 @@ static struct pci_driver ixgbe_driver = {
+ 	.err_handler = &ixgbe_err_handler
+ };
+ 
++static s32 find_btf_id(struct btf *btf, const char *name)
++{
++	s32 btf_id;
++
++	if (!btf)
++		return -EFAULT;
++
++	btf_id = btf_find_by_name_kind(btf, name, BTF_KIND_STRUCT);
++	if (btf_id < 0) {
++		pr_warn("%s: BTF cannot find struct %s", ixgbe_driver_name, name);
++		return 0;
++	}
++	pr_info("%s: BTF id %d for struct %s", ixgbe_driver_name, btf_id, name);
++	return btf_id;
++}
++
++static void ixgbe_this_module_btf_lookups(struct btf *btf)
++{
++	btf_id_xdp_hints_ixgbe = find_btf_id(btf, "xdp_hints_ixgbe");
++}
++
+ /**
+  * ixgbe_init_module - Driver Registration Routine
+  *
+@@ -11552,6 +11690,11 @@ static struct pci_driver ixgbe_driver = {
+ static int __init ixgbe_init_module(void)
+ {
+ 	int ret;
++
++	ixgbe_btf = btf_get_module_btf(THIS_MODULE);
++	if (ixgbe_btf)
++		ixgbe_this_module_btf_lookups(ixgbe_btf);
++
+ 	pr_info("%s\n", ixgbe_driver_string);
+ 	pr_info("%s\n", ixgbe_copyright);
+ 
+@@ -11597,6 +11740,7 @@ static void __exit ixgbe_exit_module(void)
+ 		destroy_workqueue(ixgbe_wq);
+ 		ixgbe_wq = NULL;
+ 	}
++	btf_put_module_btf(ixgbe_btf);
+ }
+ 
+ #ifdef CONFIG_IXGBE_DCA
+-- 
+2.35.3
+
