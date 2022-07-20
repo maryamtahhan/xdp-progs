@@ -11,6 +11,14 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+struct {
+    __uint(type, BPF_MAP_TYPE_XSKMAP);
+    __type(key, __u32);
+    __type(value, __u32);
+    __uint(max_entries, 64);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} xsks_map SEC(".maps");
+
 /* Header cursor to keep track of current parsing position */
 struct hdr_cursor {
     void *pos;
@@ -63,35 +71,8 @@ static __always_inline int parse_iphdr(struct hdr_cursor *nh,
     return iph->protocol;
 }
 
-/*
- * Swaps destination and source MAC addresses inside an Ethernet header
- */
-static __always_inline void swap_src_dst_mac(struct ethhdr *eth)
-{
-    __u8 h_tmp[ETH_ALEN];
-
-    __builtin_memcpy(h_tmp, eth->h_source, ETH_ALEN);
-    __builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
-    __builtin_memcpy(eth->h_dest, h_tmp, ETH_ALEN);
-}
-
-/*
- * Swaps destination and source IPv4 addresses inside an IPv4 header
- */
-static __always_inline void swap_src_dst_ipv4(struct iphdr *iphdr, void *data_end)
-{
-    __be32 tmp = iphdr->saddr;
-
-    // NEED TO CHECK HEADER FOR EACH PACKET ACCESS
-    if (iphdr + 1 > data_end)
-        return;
-
-    iphdr->saddr = iphdr->daddr;
-    iphdr->daddr = tmp;
-}
-
-SEC("xdp_lb")
-int  xdp_lb_func(struct xdp_md *ctx)
+SEC("xdp_filter")
+int  xdp_filter_func(struct xdp_md *ctx)
 {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
@@ -99,16 +80,23 @@ int  xdp_lb_func(struct xdp_md *ctx)
 
 
     struct hdr_cursor nh;
-    int nh_type;
+    int nh_type, ip_type;
     struct iphdr *iph;
+
     nh.pos = data;
 
     nh_type = parse_ethhdr(&nh, data_end, &eth);
     if (nh_type == bpf_htons(ETH_P_IP)) {
-        swap_src_dst_mac(eth);
-        parse_iphdr(&nh, data_end, &iph);
-        swap_src_dst_ipv4(iph, data_end);
-        return XDP_TX;
+        ip_type = parse_iphdr(&nh, data_end, &iph);
+        if (ip_type == IPPROTO_UDP) {
+            int index = ctx->rx_queue_index;
+
+            /* A set entry here means that the correspnding queue_id
+            * has an active AF_XDP socket bound to it. */
+            if (bpf_map_lookup_elem(&xsks_map, &index))
+                return bpf_redirect_map(&xsks_map, index, 0);
+
+            }
     }
 
     return XDP_PASS;

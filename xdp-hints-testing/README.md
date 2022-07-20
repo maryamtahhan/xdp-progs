@@ -47,3 +47,10 @@ Send traffic through the interface and check the output from _bpf_printk
 ```bash
  cat /sys/kernel/debug/tracing/trace_pipe
 ```
+
+Timestamp testing was completed with ptp4l (for 2 connected interfaces):
+
+```bash
+ptp4l -i eno2 -m
+ptp4l -i eno1
+```
