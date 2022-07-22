@@ -304,6 +304,35 @@ status: [OK]
 
 To exit tui mode type `quit` or `q`
 
+## To configure high performance traffic generation
+
+To configure high performance traffic generation please use DPDK with Trex
+
+Setup DPDK as specified [here](https://doc.dpdk.org/guides/linux_gsg/index.html)
+
+```bash
+modprobe vfio-pci
+```
+
+Bind your interface to DPDK
+
+```bash
+./dpdk/usertools/dpdk-devbind.py -b vfio-pci 01:00.1
+```
+
+```bash
+- port_limit      : 2
+  version         : 2
+  c               : 4
+#List of interfaces. Change to suit your setup. Use ./dpdk_setup_ports.py -s to see available options
+  interfaces    : ["01:00.1","dummy"]
+  port_info       :  # Port IPs. Change to suit your needs. In case of loopback, you can leave as is.
+          - ip         : 2.2.2.1
+            default_gw : 2.2.2.2
+```
+
+> **_NOTE:_** multiple cores are enabled with the c : 4 option.
+
 ## References
 
 - [TRex manual](https://trex-tgn.cisco.com/trex/doc/trex_manual.html)
