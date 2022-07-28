@@ -95,7 +95,10 @@ int  xdp_proc_hints_func(struct xdp_md *ctx)
         if(&xdp_hints->rss_type + 1 > data)
             goto out;
 
-        _bpf_printk("xdp_hints->rss_type = %d", xdp_hints->rss_type);
+		if(& xdp_hints->common.rx_hash32 + 1 > data)
+            goto out;
+
+        _bpf_printk("xdp_hints->rss_type = %d hash=%u", xdp_hints->rss_type, xdp_hints->common.rx_hash32);
 
     } else if(_btf_id == *xdp_hints_rx_ts_value) {
         struct xdp_hints_timestamp *xdp_hints_ts = data_meta;
