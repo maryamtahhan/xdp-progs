@@ -112,11 +112,14 @@ int  xdp_filter_func(struct xdp_md *ctx)
                 return -1;
 
             if(h->dest == 1234) {
+				// the scope of the tcp hdr whose address follows on from the ip header is
+				// deemed to be ok. So there's no issues with accessing these fields.
                 bpf_printk("Got IP packet: dest: %pI4, protocol: %u", &(iph->daddr), iph->protocol);
             }
 
         }
-        // If you disable this check the verifier fails
+        // If you disable this check the verifier fails as iph validity hasn't been
+		// checked anywhere else
          if (iph + 1 > data_end)
                  return -1;
 
