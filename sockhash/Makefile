@@ -15,8 +15,8 @@ myprog:
 	-Wno-pointer-sign \
 	-Wno-compare-distinct-pointer-types \
 	-Werror \
-	-O2 -emit-llvm -c -g -o sockmap_parser_kern.ll sockmap_parser_kern.c
-	$(LLC) -march=bpf -filetype=obj -o sockmap_parser_kern.o sockmap_parser_kern.ll
+	-O2 -emit-llvm -c -g -o sockhash_parser_kern.ll sockhash_parser_kern.c
+	$(LLC) -march=bpf -filetype=obj -o sockhash_parser_kern.o sockhash_parser_kern.ll
 	$(CLANG) -S \
 	-target bpf \
 	-D __BPF_TRACING__ \
@@ -26,8 +26,8 @@ myprog:
 	-Wno-pointer-sign \
 	-Wno-compare-distinct-pointer-types \
 	-Werror \
-	-O2 -emit-llvm -c -g -o sockmap_verdict_kern.ll sockmap_verdict_kern.c
-	$(LLC) -march=bpf -filetype=obj -o sockmap_verdict_kern.o sockmap_verdict_kern.ll
+	-O2 -emit-llvm -c -g -o sockhash_verdict_kern.ll sockhash_verdict_kern.c
+	$(LLC) -march=bpf -filetype=obj -o sockhash_verdict_kern.o sockhash_verdict_kern.ll
 
 clean:
-	rm -f *.o sockmap_parser_kern.ll sockmap_verdict_kern.ll
+	rm -f *.o sockhash_parser_kern.ll sockhash_verdict_kern.ll
